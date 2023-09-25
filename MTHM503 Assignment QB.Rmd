@@ -1,0 +1,163 @@
+---
+title: "MTHM503 Assignment QB"
+output: html_document
+date: "2023-01-01"
+---
+I think it's important to note that the following two questions are done using R. I did not do the other R based data science module, and this is my first time using R, so I apologise for how messy my code is.
+```{r Packages,include=FALSE,warning=F}
+library(psych)
+library(readr)
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggpmisc)
+library(reshape2)
+library(MASS)
+library(caret)
+library(rdist)
+library(factoextra)
+library(cluster)
+library(cclust)
+library(mgcv)
+library(GGally)
+library(splines2)
+library(ggnewscale)
+library(Hmisc)
+library(flexclust)
+```
+
+### QB ########################################################################
+
+```{r,warning=F,include=F}
+weight_height=read_csv('weight_height.csv',show_col_types = FALSE)
+```
+
+To decide on how best to model this data, lets create a visualisation of the data. Using the pairs function can tell us about the types of trends occurring between the variables.
+
+```{r,warning=F}
+weight_height=mutate(weight_height,sex=if_else(male==1,'male','female'))
+ggpairs(weight_height,columns=1:4,aes(colour=sex,alpha=0.25),warning=F,progress=F)
+```
+
+The sex of each person is binary, so have been included as the colours on the plot above. We are interested in what effects height, age, and sex have on the weight of a person. As we can see by the plot above, there is a very high correlation between weight and height, for both males and females. The correlation between weight and the other variables, and between all other combinations of variables, is much smaller. The effect height has on weight is clearly the strongest. Creating a model including age and sex would make the model more complicated than necessary, as these variables have a much smaller effect. In order to include these with good analysis, the use of more than 3 total plots would be necessary.
+
+Interestingly, the correlation between weight and sex appears to be quite strong for younger ages, but becomes much weaker and harder to read at higher ages. Perhaps investigating the effect of age on weight for younger ages only could prove informative, but this would require further work beyond this assignment.
+
+There are many different techniques to creating regression models. I will use some of these to create various models, and compare the effectiveness of each.
+
+### Polynomial Regression #####################################################
+
+A possible regression model for this data is fitting a polynomial regression line. Looking at the relationship between weight and height only, a non-linear trend appears to be appropriate. To decide which order polynomial to use, a model was quickly fitted for each order polynomial (up to order 5) and a mean squared error (MSE) was calculated for that model. A smaller MSE indicates a better fit, so the order with the lowest MSE is the most appropriate.
+
+```{r,warning=F}
+weight_height.shuffled=weight_height[sample(nrow(weight_height)),]
+folds=cut(seq(1,nrow(weight_height.shuffled)),breaks=10,labels=FALSE)
+mse=matrix(data=NA,nrow=10,ncol=5)
+for(i in 1:10){
+  test_indexes=which(folds==i,arr.ind=TRUE)
+  test_data=weight_height.shuffled[test_indexes, ]
+  train_data=weight_height.shuffled[-test_indexes, ]
+  for (j in 1:5){
+    fit.train=lm(weight~poly(height,j),data=train_data)
+    fit.test=predict(fit.train,new_data=test_data)
+    mse[i,j]=mean((fit.test-test_data$weight)^2) 
+  }
+}
+colMeans(mse)
+```
+
+The first column (corresponding to degree 2 polynomial) has the smallest MSE, so will be used going forward. Increasing the degree above this unnecessarily complicates the model, and increases the MSE.
+
+To assess how well the models fit the data, the data is randomly separated into train data (to create the model) and test data (smaller set to test how well the model fits).
+
+```{r,warning=F}
+set.seed(420)
+training.samples=createDataPartition(weight_height$height,p=0.8,list=FALSE)
+train.data=weight_height[training.samples,]
+test.data=weight_height[-training.samples,]
+```
+
+From here, a model to fit the data to a degree 2 polynomial can be created.
+
+```{r,warning=F}
+height_formula=weight~poly(height,2,raw=TRUE)
+height_model=lm(height_formula,data=weight_height)
+predictions=predict(height_model,test.data)
+height_model_performance=data.frame(RMSE=RMSE(predictions,test.data$height),R2=R2(predictions,test.data$height))
+
+height_model_performance
+summary(height_model)
+```
+
+The model created here is of the form weight = a + b x height + c x height^2, where a,b,c are coefficients. The model fitted a value for these coefficients, giving the equation weight = 20.8447599 - 0.4729525 x height + 0.0040326 x height^2. All of these coefficients have an extremely small p-value, indicating that all of these coefficients are very significant and should not be ignored.
+
+For this model, the RMSE is found to be 103.4107, meaning the standard deviation of the residuals is high, and many of the data points are quite far from the regression line fitted.
+
+The R2 statistics is found to be 0.9483617 for this model, indicating a very good fit for the data, most of the variation in the response variable around its mean is explained using this model. The adjusted R2 statistic is high at 0.9283, signifying that only useful variables have been included.
+
+### Spline Regression #########################################################
+
+Alternative to the polynomial regression, regression using splines can also be used to fit the data. Spline regression is a method that interpolates between fixed 'knots'. The location of these knots can be defined anywhere (with some locations giving a better fit). For simplicity here, they were defined as on the lower and upper quartiles of the data, and on the median.
+
+```{r,warning=F}
+knots=quantile(train.data$height,p=c(0.25,0.5,0.75))
+```
+
+Between these knots, polynomials of a defined order are fitted. It is common to use 3rd degree polynomials (known as cubic splines) for a simplistic model like this.
+
+Using the same method as previously, a model can be fitted and assessed.
+
+```{r,warning=F}
+spline_model=lm(weight~bSpline(height,knots=knots),data=train.data)
+predictions=predict(spline_model,test.data)
+splines_model_performance=data.frame(RMSE=RMSE(predictions,test.data$height),R2=R2(predictions,test.data$height))
+
+splines_model_performance
+summary(spline_model)
+```
+
+Using the spline model gives practically the same results, but with some less significant coefficients. In general, it is still a good fit, even having a higher adjusted R2 statistic of 0.9322.
+
+### Generalised Additive Model ################################################
+
+Similar to the splines technique, another regression model is the generalised additive model (GAM). This technique automatically defines the ideal location for the knots used for spline regression. This should therefore produce a more apt model to fit the data.
+
+```{r,warning=F}
+gam_model=gam(weight~s(height),data=train.data)
+predictions=predict(gam_model,test.data)
+gam_model_performance=data.frame(RMSE=RMSE(predictions,test.data$height),R2=R2(predictions,test.data$height))
+
+summary(gam_model)
+gam_model_performance
+```
+
+This model is slightly better than the splines model, but the differences are not very significant.
+
+All of these models for predicting the data are good, and very similar. All have a high adjusted R2 statistic, but all have a similarly high RMSE.
+
+We can visualise the similarity of these models.
+
+```{r,warning=F}
+colours_legend=c('Polynomial Regression'='blue','Splines Regression'='orange','GAM Regression'='green')
+ggplot(weight_height,aes(train.data,x=height,y=weight))+
+  geom_point()+
+  scale_colour_discrete() +
+  new_scale_color() +
+  stat_smooth(method=lm,formula=y~poly(x,2,raw=TRUE),aes(colour='Polynomial Regression'),se=F)+
+  stat_smooth(method=lm,formula=y~splines2::bSpline(x,df=3),aes(colour='Spline Regression'),se=F)+
+  stat_smooth(method=gam,formula=y~s(x),aes(colour='GAM Regression'),se=F)+
+  ggtitle('Weight-Height relationship for training data with different fitted models')
+```
+
+The residuals for each of these regression models can also be calculated, and visualised on a bar chart.
+
+```{r,warning=F}
+par(mfrow=c(1,3))
+boxplot(resid(height_model),main='poly',ylab="Residuals")
+boxplot(resid(spline_model),main='slpine',ylab="Residuals")
+boxplot(resid(gam_model),main='GAM',ylab="Residuals")
+```
+
+As we can see from this, all of these models give very similar, good fits for this data. These models are far from perfect, ignoring age and sex completely, but they are an effective parsimonious model, expressing the weight relationship in as simple but effective way as possible. More analysis is restricted by the limitations set by the question.
