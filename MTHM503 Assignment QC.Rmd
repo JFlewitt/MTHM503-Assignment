@@ -1,0 +1,682 @@
+---
+title: "MTHM503 Assignment QC"
+output: html_document
+date: "2023-01-01"
+---
+
+```{r Packages, include=FALSE, warning=FALSE}
+library(psych)
+library(readr)
+library(readxl)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggpmisc)
+library(reshape2)
+library(MASS)
+library(caret)
+library(rdist)
+library(factoextra)
+library(cluster)
+library(cclust)
+library(mgcv)
+library(GGally)
+library(splines2)
+library(ggnewscale)
+library(Hmisc)
+library(flexclust)
+```
+
+### QC ########################################################################
+
+### 1 #########################################################################
+
+A summary table for the data:
+
+```{r,warning=F}
+characteristics=read_csv('Characteristics.csv',show_col_types = FALSE)
+describe(characteristics)
+```
+
+Frequency of variables:
+
+```{r,warning=F}
+hist(characteristics$Percentage_IC*100,
+     xlab='Percentage of customers that are I&C',
+     main='Distribution of substation percentage of industrial or 
+     comercial customers')
+hist(characteristics$Transformer_RATING,
+     xlab='Total power delivered by substation',
+     main='Distribution of substation rating')
+barchart(characteristics$TRANSFORMER_TYPE,
+     xlab='Frequency',
+     main='Frequency of ground or pole mounted transformers')
+```
+
+To analyse relationships in the characteristics, pairwise correlation can also be visualised.
+
+```{r,warning=F}
+characteristics=mutate(characteristics,
+                       type=if_else(characteristics$TRANSFORMER_TYPE=='Grd Mtd Dist. Substation','ground','pole'))
+ggpairs(characteristics,columns=(2:6),aes(colour=type,alpha=0.25),progress=FALSE,warning=FALSE)
+```
+
+The plots above tell us the relationship between each variable in isolation, and are separated by transformer type (ground or pole, representing urban and rural areas respectively). 
+
+The strongest correlation is between the total number of customers supplied, and the number of feeders coming from the transformer. There is fairly strong positive correlation between these, especially for pole mounted transformers. This is fairly intuitive, as feeders are electrical lines leading from the main transformer, and in order to supply more individual customers, more feeders are necessary. There is a stronger correlation with pole mounted (rural areas), likely due to fewer total transformers, thus each transformer supplies more customers in general.
+
+An interesting distribution of the data is that almost all pole mounted transformers (rural) have a very low rating (power delivered), a very low feeder count and total customers, and a low percentage of I&C customers (most have close to 0%). This suggests that in rural areas, most substations provide to a small selection of domestic homes which require little power, hence the low rating and percentage_IC. When substations in rural areas provide to I&C customers (such as factories), the transformer is usually only providing to them, hence the percentage_IC distribution.
+
+The distribution of I&C customers suggests most substations focus on supplying only homes or only businesses. Ground transformers (urban) have more I&C customers, likely due to the denser number of places like office buildings or shopping centers.
+
+The frequency of ground mounted transformers is much higher than pole mounted, likely due to the increased population and power demand from cities. Transformer ratings tend to be much higher in urban areas, reinforcing this.
+
+### 2 #########################################################################
+
+To normalise the power for each time interval, a normalisation function can be defined and applied to all the relevant columns in the data. The date and substation columns need to be added back to the data and reordered to present the data in it's original form.
+
+```{r,warning=F}
+load('January_2013.RData')
+
+normalisation=function(x){
+  x/max(x)
+}
+normalised2013=t(apply(January_2013[,3:(ncol(January_2013))],1,normalisation))
+
+normalised2013=as_data_frame(normalised2013)
+normalised2013$Date=January_2013$Date
+normalised2013$Substation=January_2013$Substation
+normalised2013=subset(normalised2013,select=c(ncol(normalised2013)-1,ncol(normalised2013),1:(ncol(normalised2013)-2)))
+
+head(normalised2013,2)
+```
+
+The aggregate function can be used to average the power demand for each substation across all days.
+
+```{r,warning=F}
+substation_data=aggregate(normalised2013[,3:ncol(normalised2013)],
+                          FUN=mean,
+                          by=list(normalised2013$Substation))
+names(substation_data)[names(substation_data)=='Group.1']='Substation'
+
+#dropping the substation number to give 144 columns
+substation_data=substation_data[,2:ncol(substation_data)]
+head(substation_data,2)
+```
+
+In order to do hierarchical clustering, a linkage method must be chosen to determine the algorithm for calculating the distance between clusters. There are many different methods for doing this. The suitability of use for each method for this data can be assessed to determine which is best for use here. Performing hierarchical clustering using the most common linkage methods and taking the agglomeration coefficient (created by the agnes function) will tell us the most suitable linkage method for this data. The closer this coefficient is to 1, the stronger the clustering method for this data.
+
+```{r,warning=F}
+link_methods=c('average','single','complete','ward')
+names(link_methods)=c('average','single','complete','ward')
+agg=function(x){
+  agnes(substation_data,method=x)$ac
+}
+sapply(link_methods,agg)
+```
+
+The strongest of these linkage methods is ward's method, which acts to minimise the total within-cluster variance. This is the linkage method used going forward, as with an agglomeration coefficient of 0.9863933, it is clearly very appropriate to use.
+
+For the distance matrix, euclidean distance will be used, which is the straight line distance between two points.
+
+A distance matrix can be created, and used to perform hierarchical clustering using Ward's method. This clustering can be visualised on a dendrogram.
+
+```{r,warning=F}
+distance=get_dist(substation_data,method='euclidean')
+hc=hclust(distance,method='ward')
+plot(hc,hang=-1,main='Dendrogram',xlab='Substation Number')
+```
+
+The number of clusters is the number of separations of the data at some chosen height. The number of clusters must be enough such that the data is separated into groups with varying properties, but not too few that many properties are present withing a group. The dendrogram produced appears to suggest more than 3 clusters are necessary, but more than around 8 or 9 will be too many.
+
+There are several methods for finding the optimal number of clusters. Some of these can be visualised with the fviz_nbclust function.
+
+```{r,warning=F}
+#Elbow method
+fviz_nbclust(substation_data,FUN=hcut,method='wss')
+#Silhouette method
+fviz_nbclust(substation_data,FUN=hcut,method='silhouette')
+#Gap statistic method
+fviz_nbclust(substation_data,FUN=hcut,method='gap_stat',progress=FALSE)
+```
+
+Three common methods have been used here. The elbow method assesses the total within cluster sum of squares, for increasing numbers of clusters. This value should be minimised (which happens with increased cluster numbers), but without increasing the number of clusters too much. The graph shows that after a certain point, increasing the number of clusters has a small effect on minimising this. For this clustering, after around 5 clusters, the effect of more becomes less important, suggesting 5 as the optimal number.
+
+The silhouette method assesses how well each data point fits within its cluster, so a higher average silhouette width indicates better clustering. The plot produced suggests 2 or 5 clusters will be optimal.
+
+The third method used is the gap statistic method, which assesses how far the clustered data is from a random distribution. Maximising the gap statistic gives the optimal cluster number. The plot produces suggests 6 or more clusters will be effective.
+
+The data will be split into 5 clusters going forward. This is suggested or close to suggested by all methods above, and fits with the visual assessement of the dendrogram.
+
+Cutting the data into 5 clusters:
+
+```{r,warning=F}
+k=5
+groups=cutree(hc,k)
+table(groups)
+```
+
+There is one very large group, and one somewhat small group, but in general this is a good spread of data in each group, so appears appropriate.
+
+These groups can be visualised on the dendrogram.
+
+```{r,warning=F}
+plot(hc,hang=-1,main='Dendrogram',xlab='Substation')
+rect.hclust(hc,k=k,border=2:5)
+```
+
+Firstly, a column can be added indicating cluster number for each substation. The substation data is also being redefined to include the substation number for each row.
+
+```{r,warning=F}
+substation_data=aggregate(normalised2013[,3:ncol(normalised2013)],
+                          FUN=mean,
+                          by=list(normalised2013$Substation))
+names(substation_data)[names(substation_data)=='Group.1']='Substation'
+substation_data=cbind(substation_data,cluster=groups)
+```
+
+The data in substation_data is the average power demand across all days, split into 10 minute intervals. The average of all of these intervals gives the daily average. This can be calculated and stored in a new data frame.
+
+```{r,warning=F}
+daily_data=substation_data
+daily_average=apply(daily_data[,c(1:ncol(substation_data)-1)],1,mean)
+daily_data$daily_average=daily_average
+daily_data=daily_data[c('Substation','cluster','daily_average')]
+daily_data$index=c(1:nrow(daily_data))
+daily_data=as_data_frame(daily_data)
+```
+
+Visualising each cluster for the daily average:
+
+```{r,warning=F}
+ggplot(daily_data,aes(x=Substation,y=daily_average,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Daily average power demand for each substation')+
+  ylab('Normalised Power')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+All the clusters seem to be quite evenly spread across the daily average. This doesn't really give much information about how clusters are connected.
+
+Instead plotting the demand for each 10 minute interval across all days:
+
+```{r,warning=F}
+melt_data=melt(substation_data[,2:ncol(substation_data)],id.vars='cluster',variable.name='interval')
+ggplot(melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Average power demand over 24 hours')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+This gives a lot of information about how clusters are separated, and will be useful when determining what separates their members.
+
+The trends seen between clusters for this group appear to be quite clear and unique, each cluster showing an obvious and somewhat clean difference in the daily power demand. This indicates the number of clusters is appropriate for accurately describing the data, while being few enough to be simple.
+
+For weekday/weekend variation, a column indicating whether it is a weekend or weekend can be added using the January 2013 calendar. This column needs to be added to the normalised2013 data, which included dates before it was aggregated based on substation. Using this, the data can be separated based on weekend or weekday.
+
+```{r,warning=F}
+normalised2013$day=format(as.Date(normalised2013$Date,format='%Y-%m-%d'),format='%d')
+normalised2013=mutate(normalised2013,weekday=if_else((day=='05'|day=='06'|day=='12'|day=='13'|day=='19'|day=='20'|day=='26'|day=='27'),'weekend','weekday'))
+```
+
+Now a column indicating the cluster number for each substation needs to be added. To do this, an allocation data frame can be created, and used as a key to join substation number to a cluster number.
+
+```{r,warning=F}
+substation_allocation=substation_data
+substation_allocation=substation_allocation[c(1,ncol(substation_allocation))]
+normalised2013=left_join(normalised2013,substation_allocation,by='Substation')
+```
+
+Separating out weekends and weekdays can now be done. This data needs to then be aggregated by substation number in order to make a clean plot to visualise.
+
+```{r,normalised2013}
+weekday_data=normalised2013[normalised2013$weekday=='weekday',]
+weekday_data=cbind(weekday_data[,3:(ncol(weekday_data)-3)],cluster=weekday_data['cluster'],Substation=weekday_data['Substation'])
+weekday_data=aggregate(weekday_data[,1:(ncol(weekday_data)-1)],FUN=mean,by=list(weekday_data$Substation))
+names(weekday_data)[names(weekday_data)=='Group.1']='Substation'
+
+weekend_data=normalised2013[normalised2013$weekday=='weekend',]
+weekend_data=cbind(weekend_data[,3:(ncol(weekend_data)-3)],cluster=weekend_data['cluster'],Substation=weekend_data['Substation'])
+weekend_data=aggregate(weekend_data[,1:(ncol(weekend_data)-1)],FUN=mean,by=list(weekend_data$Substation))
+names(weekend_data)[names(weekend_data)=='Group.1']='Substation'
+```
+
+The average demand profile for all days can be visualised again.
+
+```{r,warning=F}
+weekday_melt_data=melt(weekday_data[,2:ncol(weekday_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekday_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekdays')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+
+weekend_melt_data=melt(weekend_data[,2:ncol(weekend_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekend_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekends')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+There are no huge changes to the clustering for weekends and weekdays, but some important information is presented. The power demand for cluster 1 shifts slightly later in the day on weekends, but the shape remains unchanged. Cluster 2 has slightly less power demand at night on weekdays. Cluster 3 has a drastic shift on weekends from a clear day night divide to a more even spread. Cluster 4 sees very little change. Cluster 5 sees a similar shift as cluster 1.
+
+Comparing the characteristics data can be done by separating the characteristics based on which cluster each substation number belongs to. This data can then be plotted with ggpairs. Note that there is so little variation in the transformer type for cluster 3 that the data can't be separated like the other clusters, hence the lack of colour.
+
+```{r,warning=F}
+c1=substation_data[substation_data$cluster=='1',]$Substation
+c2=substation_data[substation_data$cluster=='2',]$Substation
+c3=substation_data[substation_data$cluster=='3',]$Substation
+c4=substation_data[substation_data$cluster=='4',]$Substation
+c5=substation_data[substation_data$cluster=='5',]$Substation
+
+char1=characteristics[characteristics$SUBSTATION_NUMBER%in%c1,]
+char2=characteristics[characteristics$SUBSTATION_NUMBER%in%c2,]
+char3=characteristics[characteristics$SUBSTATION_NUMBER%in%c3,]
+char4=characteristics[characteristics$SUBSTATION_NUMBER%in%c4,]
+char5=characteristics[characteristics$SUBSTATION_NUMBER%in%c5,]
+
+ggpairs(char1,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 1',progress=FALSE,warning=FALSE)
+ggpairs(char2,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 2',progress=FALSE,warning=FALSE)
+ggpairs(char3,columns=(2:6),aes(alpha=0.25),title='Cluster 3',progress=FALSE,warning=FALSE)
+ggpairs(char4,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 4',progress=FALSE,warning=FALSE)
+ggpairs(char5,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 5',progress=FALSE,warning=FALSE)
+```
+
+Cluster 2 - From all the data visualised so far, information we can assign to cluster 2 is that the substations provide power all day and night evenly, is almost entirely in urban areas, provides to almost entirely I&C customers, and has very few customers. This suggests cluster 2 is a group of substations providing almost entirely to large factories and warehouses in urban areas. The transformer rating is mostly mid-range, with some high-range, which supports that both high demand factories and mid-demand warehouse-style industries are present. The almost lack of weekend variation suggests industry that never shuts down is mainly present (like steelworks), with some weekday operating industry also present. This cluster is henceforth known as 'urban_industry'.
+
+Cluster 3 - This cluster supplies power almost exclusively in the daytime. Power is supplied entirely in urban areas, to only I&C customers. There are few total customers. The power demand/rating is mostly mid to high range. This all suggests cluster 3 consists of office buildings in cities, due to the shutdown at night and clear separation between weekdays and weekends. Lets call this 'offices'.
+
+Cluster 4 - This cluster only provides power at night, in mostly urban areas. Customers are mainly domestic. For the urban areas, transformer rating is very high, and vice versa. For rural customers, they provide to few customers. This could suggest cluster 3 provides power to lighting (such as streetlights). Cluster 4 has no variation between weekdays and weekends, like what is expected from streetlights. Looking at the number of members in each group, 4 was the particularly small group, with the smallest number of substations. This fits with the suggestion that this cluster could consist of streetlights, as these are not a particularly demanding subsection, and are all connected along long roads, so many substations are probably not needed. This cluster could be named 'lights'.
+
+Clusters 1 and 5 - Clusters 1 and 5 are best assessed together, as they are very similar, but somewhat mirror each other. cluster 1 is entirely urban, and 5 entirely rural. Both clusters (but especially 5) supply to only domestic customers, with a low demand/transformer rating. These all suggest clusters 1 and 5 supply houses, but separated by rural/urban. Cluster 5 has fewer total customers than 1, likely due to lower population density in rural areas. The daily power demand profile also suggests providing to houses, with a peak in the evening and trough in the morning. This demand profile shifts later in the day on weekends, which would be explained by people having lie-ins when not at work. Cluster 1 was by far the most populated cluster, which is expected due to the high population in cities. These clusters will be named 'urban_houses' and 'rural_houses' respectively. 
+
+The cluster numbers can be replaced by these names now.
+
+```{r,warning=F}
+substation_data$cluster=replace(substation_data$cluster,substation_data$cluster=='1','urban_houses')
+substation_data$cluster=replace(substation_data$cluster,substation_data$cluster=='2','urban_industry')
+substation_data$cluster=replace(substation_data$cluster,substation_data$cluster=='3','offices')
+substation_data$cluster=replace(substation_data$cluster,substation_data$cluster=='4','lights')
+substation_data$cluster=replace(substation_data$cluster,substation_data$cluster=='5','rural_houses')
+```
+
+### 3 #########################################################################
+
+Similarly to the method above, the new data was normalised and aggregated by substation.
+
+```{r,warning=F}
+load('new_substations.RData')
+
+normalised_new=t(apply(new_substations[,3:(ncol(new_substations))],1,normalisation))
+normalised_new=as_data_frame(normalised_new)
+normalised_new$Date=new_substations$Date
+normalised_new$Substation=new_substations$Substation
+normalised_new=subset(normalised_new,select=c(ncol(normalised_new)-1,ncol(normalised_new),1:(ncol(normalised_new)-2)))
+
+new_substation_data=aggregate(normalised_new[,3:ncol(normalised_new)],FUN=mean,by=list(normalised_new$Substation))
+names(new_substation_data)[names(new_substation_data)=='Group.1']='Substation'
+```
+
+The data can also be separated by weekend and weekday, like above.
+
+```{r,warning=F}
+normalised_new$day=format(as.Date(normalised_new$Date,format='%Y-%m-%d'),format='%d')
+normalised_new=mutate(normalised_new,weekday=if_else((day=='05'|day=='06'|day=='12'|day=='13'|day=='19'|day=='20'|day=='26'|day=='27'),'weekend','weekday'))
+
+weekday_data=normalised_new[normalised_new$weekday=='weekday',]
+weekday_data=aggregate(weekday_data[,3:(ncol(weekday_data)-2)],FUN=mean,by=list(weekday_data$Substation))
+names(weekday_data)[names(weekday_data)=='Group.1']='Substation'
+
+weekend_data=normalised_new[normalised_new$weekday=='weekend',]
+weekend_data=aggregate(weekend_data[,3:(ncol(weekend_data)-2)],FUN=mean,by=list(weekend_data$Substation))
+names(weekend_data)[names(weekend_data)=='Group.1']='Substation'
+```
+
+The power demand for weekdays and weekends can be plotted (before and after separation).
+
+```{r,warning=F}
+new_substation_data$index=c('513687','521055','522287','525379','531475')
+new_melt_data=melt(new_substation_data[,2:(ncol(new_substation_data))],id.vars='index',variable.name='interval')
+ggplot(new_melt_data,aes(x=interval,y=value,colour=factor(index)))+
+  geom_point(size=0.8)+
+  ggtitle('Average power demand for new substations (weekend not separated)')+
+  ylab('Normalised Power')+
+  xlab('Time')
+
+weekday_melt=melt(weekday_data,id.vars='Substation',variable.name='interval')
+weekday_melt$weekday='weekday'
+weekend_melt=melt(weekend_data,id.vars='Substation',variable.name='interval')
+weekend_melt$weekday='weekend'
+all_melt=rbind(weekday_melt,weekend_melt)
+ggplot(all_melt,aes(x=interval,y=value,colour=factor(weekday)))+
+  geom_point(size=0.8)+
+  ggtitle('Average power demand for new substations (weekend separated)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(Substation)',scales='fixed')
+```
+
+Each substation appears to fit into one or two of the clusters already defined, as the general shape of the distribution looks very familiar. 513687 clearly belongs to urban_industry. 522287 and 531475 are most similar to offices. 521055 and 525379 clearly belong to a houses cluster, but could be either urban or rural.
+
+Assigning each new substation to a cluster created with k means clustering:
+
+```{r,warning=F}
+train.data=substation_data
+test.data=new_substation_data
+
+kc=kcca(train.data[,2:(ncol(train.data)-1)],k=5,kccaFamily('kmeans'))
+predict_train=predict(kc)
+predict_test=predict(kc,test.data[,2:(ncol(train.data)-1)])
+
+image(kc)
+points(train.data[,2:(ncol(train.data)-1)],col=predict_train,pch=19,cex=0.3)
+points(test.data[,2:(ncol(test.data)-1)],col=predict_test,pch=22,bg="orange")
+```
+
+This method places three of the new substations in the cluster defined as urban houses, and the other two in the urban industry cluster. This isn't exactly what I imagined initially, but also isn't a wild claim. Three of the new substations have a profile very or somewhat similar to the urban houses, so this is believable. One very clearly belongs in urban industry, so again fits. The last new substation has a high demand profile for most of the day, especially on weekends, so the similarity to urban industry is certainly there. The diagram also shows the closeness of these clusters, which would explain how a substation near the boundary could easily belong to a different cluster than it is assigned.
+
+### 4 ##########################################################################
+
+```{r,warning=F}
+load('January_2014.RData')
+load('January_2015.RData')
+```
+
+We have clusters assigned to the 2013 data, but lets see if repeating the same process yields new cluster allocation for 2014 and 2015.
+
+2014:
+
+```{r,warning=F}
+normalised2014=t(apply(January_2014[,3:(ncol(January_2014))],1,normalisation))
+normalised2014=as_data_frame(normalised2014)
+normalised2014$Date=January_2014$Date
+normalised2014$Substation=January_2014$Substation
+normalised2014=subset(normalised2014,select=c(ncol(normalised2014)-1,ncol(normalised2014),1:(ncol(normalised2014)-2)))
+
+substation_data_2014=aggregate(normalised2014[,3:ncol(normalised2014)],FUN=mean,by=list(normalised2014$Substation))
+names(substation_data_2014)[names(substation_data_2014)=='Group.1']='Substation'
+substation_data_2014=substation_data_2014[,2:ncol(substation_data_2014)]
+
+link_methods=c('average','single','complete','ward')
+names(link_methods)=c('average','single','complete','ward')
+agg=function(x){
+  agnes(substation_data_2014,method=x)$ac
+}
+sapply(link_methods,agg)
+```
+
+Assessing the possible linkage methods for the 2014 data also suggests the best method to use is Ward's method, thus this will again be used.
+
+```{r,warning=F}
+distance=get_dist(substation_data_2014,method='euclidean')
+hc=hclust(distance,method='ward.D2')
+plot(hc,hang=-1,main='Dendrogram for 2014 data',xlab='Substation Number')
+```
+
+For 2014 data, the dendrogram is more compact, most links occur at smaller distances. The expected number of clusters is around 5-9 from this diagram.
+
+```{r,warning=F}
+fviz_nbclust(substation_data_2014,FUN=hcut,method='wss') #~5
+fviz_nbclust(substation_data_2014,FUN=hcut,method='silhouette') #2 or 5
+fviz_nbclust(substation_data_2014,FUN=hcut,method='gap_stat',progress=FALSE) #6+
+```
+
+For the 2014 data, the elbow method is again suggesting around 5 clusters, silhouette is suggesting 2 or 5 clusters, and the gap statistic is suggesting upwards of 6 clusters. This is suggesting the cluster number should be the same as 2013, 5 clusters.
+
+```{r,warning=F}
+k=5
+groups=cutree(hc,k)
+table(groups)
+```
+
+This grouping appears similar to 2013 grouping, with one particularly large and one particularly small group. The 2014 data is even more skewed however, with the large group being even more dominant, and the small group being less prominent. If the cluster definitions remain similar to 2013, this could be illustrating an increase in power demand from urban homes due to population increase, and could also show that all industries are in need of more power in 2014, except streetlights, which change very little year to year, so begin to be left behind in substation allocation.
+
+```{r,warning=F}
+plot(hc,hang=-1,main='Dendrogram',xlab='Substation')
+rect.hclust(hc,k=k,border=2:5)
+```
+
+Lets visualise these clusters.
+
+```{r,warning=F}
+substation_data_2014=aggregate(normalised2014[,3:ncol(normalised2014)],FUN=mean,by=list(normalised2014$Substation))
+names(substation_data_2014)[names(substation_data_2014)=='Group.1']='Substation'
+substation_data_2014=cbind(substation_data_2014,cluster=groups)
+
+melt_data_2014=melt(substation_data_2014[,2:ncol(substation_data_2014)],id.vars='cluster',variable.name='interval')
+ggplot(melt_data_2014,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Average power demand over 24 hours (2014)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+As we can see, these clusters follow the same rough distribution as the clusters for 2013. The rates at which power demand increases year to year for each industry (homes, factories, offices etc.) will be different, hence the distance between data points change at different rates, so the cluster allocation will change year to year. The change in data points location has lead to even more substations being allocated to cluster 1. The number of substations has not changed from 2013, and assuming the characteristics data still holds, each substation supplies the same customers each year. Since the number of substations supplying urban houses (2013 cluster 1) is therefore the same, it is very likely that substations supplying customers best placed in other clusters are now grouped with the 2013 urban houses group. Similarly, some of the old data may now be in a different cluster. The old clusters were likely not perfect collections of each customer type, but this merging of clusters will be making clusters worse collections of substations. The change from 2013 to 2014 was not drastic, but if merging like this continues to increase, the number of clusters will likely need to change, so that the large collection in cluster 1 can be better differentiated. 
+
+Note that the given cluster names have swapped positions for clusters 2 and 3 compared to 2013.
+
+Weekend separation:
+
+```{r,warning=F}
+normalised2014$day=format(as.Date(normalised2014$Date,format='%Y-%m-%d'),format='%d')
+normalised2014=mutate(normalised2014,weekday=if_else((day=='05'|day=='04'|day=='12'|day=='11'|day=='19'|day=='18'|day=='26'|day=='25'),'weekend','weekday'))
+
+substation_allocation=substation_data_2014
+substation_allocation=substation_allocation[c(1,ncol(substation_allocation))]
+normalised2014=left_join(normalised2014,substation_allocation,by='Substation')
+
+weekday_data=normalised2014[normalised2014$weekday=='weekday',]
+weekday_data=cbind(weekday_data[,3:(ncol(weekday_data)-3)],cluster=weekday_data['cluster'],Substation=weekday_data['Substation'])
+weekday_data=aggregate(weekday_data[,1:(ncol(weekday_data)-1)],FUN=mean,by=list(weekday_data$Substation))
+names(weekday_data)[names(weekday_data)=='Group.1']='Substation'
+
+weekend_data=normalised2014[normalised2014$weekday=='weekend',]
+weekend_data=cbind(weekend_data[,3:(ncol(weekend_data)-3)],cluster=weekend_data['cluster'],Substation=weekend_data['Substation'])
+weekend_data=aggregate(weekend_data[,1:(ncol(weekend_data)-1)],FUN=mean,by=list(weekend_data$Substation))
+names(weekend_data)[names(weekend_data)=='Group.1']='Substation'
+
+weekday_melt_data=melt(weekday_data[,2:ncol(weekday_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekday_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekdays (2014)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+
+weekend_melt_data=melt(weekend_data[,2:ncol(weekend_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekend_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekends (2014)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+The difference between weekdays and weekends are unchanged from 2013, enforcing my decision to leave keep the 2013 cluster names.
+
+To check this further, lets look at the characteristics data for 2014. This is assuming this data is unchanged year to year, each substation provides to the same customers each year. 
+
+```{r,warning=F}
+c1=substation_data_2014[substation_data_2014$cluster=='1',]$Substation
+c2=substation_data_2014[substation_data_2014$cluster=='2',]$Substation
+c3=substation_data_2014[substation_data_2014$cluster=='3',]$Substation
+c4=substation_data_2014[substation_data_2014$cluster=='4',]$Substation
+c5=substation_data_2014[substation_data_2014$cluster=='5',]$Substation
+
+char1=characteristics[characteristics$SUBSTATION_NUMBER%in%c1,]
+char2=characteristics[characteristics$SUBSTATION_NUMBER%in%c2,]
+char3=characteristics[characteristics$SUBSTATION_NUMBER%in%c3,]
+char4=characteristics[characteristics$SUBSTATION_NUMBER%in%c4,]
+char5=characteristics[characteristics$SUBSTATION_NUMBER%in%c5,]
+
+ggpairs(char1,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 1',progress=FALSE)
+ggpairs(char2,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 2',progress=FALSE)
+ggpairs(char3,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 3',progress=FALSE)
+ggpairs(char4,columns=(2:6),aes(alpha=0.25),title='Cluster 4',progress=FALSE)
+ggpairs(char5,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 5',progress=FALSE)
+```
+
+These plots again reinforce my decision to keep the 2013 cluster descriptions, as this data is very similar for each cluster.
+
+2015:
+Now lets see if 2015 data has changed enough to justify new cluster allocations.
+
+```{r,warning=F}
+normalised2015=t(apply(January_2015[,3:(ncol(January_2015))],1,normalisation))
+normalised2015=as_data_frame(normalised2015)
+normalised2015$Date=January_2015$Date
+normalised2015$Substation=January_2015$Substation
+normalised2015=subset(normalised2015,select=c(ncol(normalised2015)-1,ncol(normalised2015),1:(ncol(normalised2015)-2)))
+
+substation_data_2015=aggregate(normalised2015[,3:ncol(normalised2015)],FUN=mean,by=list(normalised2015$Substation))
+names(substation_data_2015)[names(substation_data_2015)=='Group.1']='Substation'
+substation_data_2015=substation_data_2015[,2:ncol(substation_data_2015)]
+
+link_methods=c('average','single','complete','ward')
+names(link_methods)=c('average','single','complete','ward')
+agg=function(x){
+  agnes(substation_data_2015,method=x)$ac
+}
+sapply(link_methods,agg)
+```
+
+Assessing the possible linkage methods for the 2015 data also suggests the best method to use is Ward's method, thus this will again be used.
+
+```{r,warning=F}
+distance=get_dist(substation_data_2015,method='euclidean')
+hc=hclust(distance,method='ward.D2')
+plot(hc,hang=-1,main='Dendrogram for 2014 data',xlab='Substation Number')
+```
+
+For 2015 data the expected number of clusters is around 3-10. The compactness of this diagram makes it difficult to assertain from visual assessment alone.
+
+```{r,warning=F}
+fviz_nbclust(substation_data_2015,FUN=hcut,method='wss') #4-9
+fviz_nbclust(substation_data_2015,FUN=hcut,method='silhouette') #2 or 5
+fviz_nbclust(substation_data_2015,FUN=hcut,method='gap_stat',progress=FALSE) #7+
+```
+
+For the 2015 data, the elbow method is suggesting a broad number of possible clusters up to around 8 or 9, silhouette is again suggesting 2 or 5 clusters, and the gap statistic is suggesting upwards of 7 clusters. This is suggesting more clusters should be used than in previous years, possibly 7.
+
+```{r,warning=F}
+k=7
+groups=cutree(hc,k)
+table(groups)
+```
+
+This cluster grouping has split up the dominant larger group from previous years. This is good, as it will help differentiate between the increasingly convoluted group. This number of clusters also prevents the particularly small cluster from becoming increasingly irrelevant compared to the others.
+
+```{r,warning=F}
+plot(hc,hang=-1,main='Dendrogram',xlab='Substation')
+rect.hclust(hc,k=k,border=2:5)
+```
+
+Lets visualise these clusters.
+
+```{r,warning=F}
+substation_data_2015=aggregate(normalised2015[,3:ncol(normalised2015)],FUN=mean,by=list(normalised2015$Substation))
+names(substation_data_2015)[names(substation_data_2015)=='Group.1']='Substation'
+substation_data_2015=cbind(substation_data_2015,cluster=groups)
+
+melt_data_2015=melt(substation_data_2015[,2:ncol(substation_data_2015)],id.vars='cluster',variable.name='interval')
+ggplot(melt_data_2015,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Average power demand over 24 hours (2015)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+By increasing the number of clusters, the data for 2015 has been separated into clean distinct groups. The distribution of data here will need to be assessed further using the characteristics data in order for a description of each cluster to be made.
+
+Again from 2014 to 2015, the power distributions have changed at different rates for different industries, so the cluster allocations have changed. By changing the number of clusters, each cluster is now a better representation of the data points surrounding it.
+
+Weekend separation:
+
+```{r,warning=F}
+normalised2015$day=format(as.Date(normalised2015$Date,format='%Y-%m-%d'),format='%d')
+normalised2015=mutate(normalised2015,weekday=if_else((day=='05'|day=='04'|day=='12'|day=='11'|day=='19'|day=='18'|day=='26'|day=='25'),'weekend','weekday'))
+
+substation_allocation=substation_data_2015
+substation_allocation=substation_allocation[c(1,ncol(substation_allocation))]
+normalised2015=left_join(normalised2015,substation_allocation,by='Substation')
+
+weekday_data=normalised2015[normalised2015$weekday=='weekday',]
+weekday_data=cbind(weekday_data[,3:(ncol(weekday_data)-3)],cluster=weekday_data['cluster'],Substation=weekday_data['Substation'])
+weekday_data=aggregate(weekday_data[,1:(ncol(weekday_data)-1)],FUN=mean,by=list(weekday_data$Substation))
+names(weekday_data)[names(weekday_data)=='Group.1']='Substation'
+
+weekend_data=normalised2015[normalised2015$weekday=='weekend',]
+weekend_data=cbind(weekend_data[,3:(ncol(weekend_data)-3)],cluster=weekend_data['cluster'],Substation=weekend_data['Substation'])
+weekend_data=aggregate(weekend_data[,1:(ncol(weekend_data)-1)],FUN=mean,by=list(weekend_data$Substation))
+names(weekend_data)[names(weekend_data)=='Group.1']='Substation'
+
+weekday_melt_data=melt(weekday_data[,2:ncol(weekday_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekday_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekdays (2015)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+
+weekend_melt_data=melt(weekend_data[,2:ncol(weekend_data)],id.vars='cluster',variable.name='interval')
+ggplot(weekend_melt_data,aes(x=interval,y=value,colour=factor(cluster)))+
+  geom_point(size=0.8)+
+  ggtitle('Weekends (2015)')+
+  ylab('Normalised Power')+
+  xlab('Time')+
+  facet_wrap('factor(cluster)',scales='fixed')
+```
+
+Interestingly, the variation between weekends and weekdays is barely noticeable for all clusters, suggesting this isn't an important factor. This will be useful to know when the characteristics data is assessed to determine the nature of these groupings.
+
+```{r,warning=F}
+c1=substation_data_2015[substation_data_2015$cluster=='1',]$Substation
+c2=substation_data_2015[substation_data_2015$cluster=='2',]$Substation
+c3=substation_data_2015[substation_data_2015$cluster=='3',]$Substation
+c4=substation_data_2015[substation_data_2015$cluster=='4',]$Substation
+c5=substation_data_2015[substation_data_2015$cluster=='5',]$Substation
+c6=substation_data_2015[substation_data_2015$cluster=='6',]$Substation
+c7=substation_data_2015[substation_data_2015$cluster=='7',]$Substation
+
+char1=characteristics[characteristics$SUBSTATION_NUMBER%in%c1,]
+char2=characteristics[characteristics$SUBSTATION_NUMBER%in%c2,]
+char3=characteristics[characteristics$SUBSTATION_NUMBER%in%c3,]
+char4=characteristics[characteristics$SUBSTATION_NUMBER%in%c4,]
+char5=characteristics[characteristics$SUBSTATION_NUMBER%in%c5,]
+char6=characteristics[characteristics$SUBSTATION_NUMBER%in%c6,]
+char7=characteristics[characteristics$SUBSTATION_NUMBER%in%c7,]
+
+ggpairs(char1,columns=(2:6),aes(alpha=0.25),title='Cluster 1',progress=FALSE)
+ggpairs(char2,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 2',progress=FALSE)
+ggpairs(char3,columns=(2:6),aes(alpha=0.25),title='Cluster 3',progress=FALSE)
+ggpairs(char4,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 4',progress=FALSE)
+ggpairs(char5,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 5',progress=FALSE)
+ggpairs(char6,columns=(2:6),aes(alpha=0.25),title='Cluster 6',progress=FALSE)
+ggpairs(char7,columns=(2:6),aes(colour=type,alpha=0.25),title='Cluster 7',progress=FALSE)
+```
+
+Cluster 1 - All urban, a large spread of I&C customers and total customers. Almost all transformers have mid level rating. Cluster 1 is contains almost exclusively mid level transformer ratings, and the daily distribution has a dip at night/early morning. This cluster is almost the inverse of cluster 5, similarly containing a broad spectrum of customers, but grouping together the mid level power demands that operate in the daytime.
+
+Cluster 2 - All urban domestic customers, with low transformer ratings and a spread of total customers. The daily demand profile very cleanly fits the classic distribution of houses. This cluster has the most substations included, which is expected of houses in urban areas. All this suggests cluster 2 is a collection of urban houses almost exclusively. The increased cluster number may have caused some substations that supply to urban houses to also be included in other groups, especially since the number of members of the urban houses group has dramatically decreased. 
+
+Cluster 3 - Peaks during the day, trough at night. Exclusively urban, supplying to only a low total number of I&C customers with mid to high transformer ratings. This information suggests this group is very similar to the offices group from previous years, however the change from weekday to weekend is less drastic here, suggesting more businesses that operate all week are included.
+
+Cluster 4 - The daily demand profile suggests this cluster is mainly containing the 24 hour businesses and industry, similar to previous years. The characteristics data tells us this cluster is all urban I&C customers, with very low total customers and mid to high transformer ratings. This confirms that this cluster is likely still mostly high demand industry and warehouses in cities. There is clearly some data points that don't fit this description included in this cluster. The daily demand shows a few substations that supply much less power in the daytime. This is likely due to the shift of demand through years, and the changed cluster number. This is expected in small quantities. The rural substations in this group are all I&C customers, confirming that this cluster is closely linked by 24 hour operating industry.
+
+Cluster 5 - This is by far the smallest group, with a demand peak at night (specifically just after midnight). The vast majority of substations are urban. This cluster interestingly has a broad range of percentage I&C, total customers, and feeder counts. Cluster 5 has mostly very high, and some mid range transformer ratings, suggesting this is a grouping of customers that use exceptionally high amounts of power, particularly at night. This could be a collection of extremely high demand homes, lights around the city, or high demand industry that isn't 24 hours, like waste disposal.
+
+Cluster 6 & 7 - All rural, all domestic customers, with all very low total customer number and very low transformer ratings. These clusters are almost identical, with cluster 7 having a small number of I&C customers. Cluster 7 has slightly fewer substations included, and looking at the daily demand profiles, has on average a higher power demand across the whole 24 hours. The demand profile is similar to that of houses, with a peak in the evening and trough in early morning, however neither profile is a clean representation of this. The biggest variation in data for both of these clusters is the power demand from each substation. These clusters seem to have separated urban houses into two groups, consisting of houses with high power demand, and houses with low power demand (clusters 7 and 6 respectively).
+
+Conclusion:
+
+The transition from 2013 to 2015 has caused the cluster allocation to change, due to the changing power demands of each substation through the years. The original 5 cluster grouping begins to fail after 2013, and by 2015 isn't appropriate at all, as now the new distances between data points cause substations supplying to vastly different customers to be grouped together. By revaluating how many clusters are appropriate, the data can be clustered into new groups to better represent similarities. The 2015 grouping is better in some ways, separating one of the larger groups (rural housing) into high and low power demand rural housing, but is less precise in some ways, grouping some businesses that operate all week long with the weekday only office data.
+
+As years progress past 2015, the power demands will continue to change at different rates for different customers. Predictions as to how these rates will change can be made, but can not be completely reliable. Major world events, like the COVID-19 pandemic or the effects of BREXIT will drastically change the power demands of houses and offices and businesses. Regular updates to the clustering for this type of data is necessary to have an accurate picture of the data profiles.
