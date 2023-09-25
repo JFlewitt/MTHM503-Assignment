@@ -21,54 +21,6 @@ library(extraDistr)
 library(reshape2) 
 library(plotly)
 
-### Q2 ########################################################################
-
-#I will run a large number of simulations, and count the number of simulations
-#in which B wins. I will divide by the number of simulations to get the
-#probability B wins
-sims=10000
-counter=0
-days=14
-
-#The idea is to run a simulation for each day, and use the number of supporters
-#from the previous day
-#This can be done with a loop, where the Band M supporters change each 
-#iteration/day
-
-#We need the probability of success each day, NOT the expected number of 
-#supporters
-
-#To understand the multiple day loop, a formula for the probability after 1 day
-#need to be understood
-
-#there were quite a few failed attempts here, such as one that only found the 
-#expected value of supporters after so many days
-
-#Maybe by creating a list for the possible number of supporters at which the 
-#probabilities cross, then using the probability of having that many supporters
-#and the probability of M having fewer than that many, then extracting each 
-#value from the list to find the total probability (using law of total prob)
-probs=list()
-for(k in 0:184){
-  for(i in k:175){
-    BB=choose(175,i)*(0.996**i)*(0.004**(175-i))
-  }
-  for(i in k:184){
-    MB=choose(184,i)*(0.005**i)*(0.995**(184-i))
-  }
-  for(i in 0:k){
-    MM=choose(184,i)*(0.995**i)*(0.005**(184-i))
-  }
-  for(i in 0:k){
-    BM=choose(175,i)*(0.004**i)*(0.996**(175-i))
-  }
-  probs=append(probs,BB+MB+MM+BM)
-}
-
-#probs
-
-#This isn't going well
-
 ### Q3 ########################################################################
 
 #generating quantiles for standard normal distribution for 95% CI
