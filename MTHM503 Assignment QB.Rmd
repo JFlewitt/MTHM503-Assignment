@@ -3,7 +3,7 @@ title: "MTHM503 Assignment QB"
 output: html_document
 date: "2023-01-01"
 ---
-I think it's important to note that the following two questions are done using R. I did not do the other R based data science module, and this is my first time using R, so I apologise for how messy my code is.
+
 ```{r Packages,include=FALSE,warning=F}
 library(psych)
 library(readr)
